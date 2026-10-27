@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AR Draw</title>
+<style>
+:root{--bg:#000;--panel:#1c1c1ee6;--fg:#fff;--ac:#4f8cff}
+@media (prefers-color-scheme:light){:root{--panel:#f5f5f7ee;--fg:#111}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;background:#000;color:var(--fg);font-family:system-ui,sans-serif;overflow:hidden;touch-action:none}
+#stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#camwrap{position:absolute;inset:0;transform-origin:center;display:flex;align-items:center;justify-content:center;background:#111}
+video{width:100%;height:100%;object-fit:cover}
+#ov{position:absolute;left:50%;top:50%;transform-origin:center;max-width:none;user-select:none;-webkit-user-drag:none;display:none;pointer-events:none}
+#panel{position:fixed;left:0;right:0;bottom:0;background:var(--panel);backdrop-filter:blur(10px);padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));border-radius:16px 16px 0 0;max-height:60vh;overflow:auto;touch-action:pan-y;z-index:5}
+#panel.min{display:none}
+.row{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:13px}
+.row label{width:92px;flex:none}
+.row input[type=range]{flex:1;accent-color:var(--ac)}
+.row output{width:52px;text-align:right;font-variant-numeric:tabular-nums}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px}
+button,.file{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:9px 12px;font-size:13px;cursor:pointer}
+button.alt{background:#555}
+button.on{background:#e5484d}
+#toggle{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));right:10px;z-index:6;border-radius:50%;width:42px;height:42px;padding:0;font-size:18px}
+#msg{position:fixed;top:60px;left:12px;right:12px;text-align:center;font-size:13px;background:#000a;color:#fff;padding:8px;border-radius:10px;display:none;z-index:6}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="camwrap"><video id="v" autoplay playsinline muted></video></div>
+  <img id="ov" alt="">
+</div>
+<div id="msg"></div>
+<button id="toggle" class="alt">☰</button>
+<div id="panel">
+  <div class="btns">
+    <label class="file">📷 Elegir imagen<input id="file" type="file" accept="image/*"></label>
+    <button id="cam">Iniciar cámara</button>
+    <label class="file" style="background:#2f9e5b">📸 Foto de fondo<input id="bgfile" type="file" accept="image/*" capture="environment"></label>
+    <button id="lock" class="alt">🔓 Bloquear</button>
+    <button id="flip" class="alt">↔ Espejo</button>
+    <button id="reset" class="alt">Reiniciar</button>
+  </div>
+  <div class="row"><label>Tamaño imagen</label><input id="sImg" type="range" min="0" max="1000" value="500"><output id="oImg">100%</output></div>
+  <div class="row"><label>Tamaño cámara</label><input id="sCam" type="range" min="5" max="100" value="100"><output id="oCam">100%</output></div>
+  <div class="row"><label>Opacidad</label><input id="sOp" type="range" min="5" max="100" value="50"><output id="oOp">50%</output></div>
+  <div class="row"><label>Rotación</label><input id="sRot" type="range" min="-180" max="180" value="0"><output id="oRot">0°</output></div>
+  <div class="row" id="zrow" style="display:none"><label>Zoom cámara</label><input id="sZoom" type="range" min="1" max="2" step="0.1" value="1"><output id="oZoom">1x</output></div>
+  <div style="font-size:11px;opacity:.7;margin-top:6px">Un dedo mueve la imagen · dos dedos: pellizca para achicar/agrandar y gira. Bloquea para que no se mueva al dibujar.</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const v=$('v'),ov=$('ov'),cw=$('camwrap');
+const S={x:0,y:0,s:1,r:0,op:.5,cam:1,flip:1,locked:false};
+const MINS=0.01,MAXS=10;
+// slider logarítmico: 0..1000 -> 1%..1000%
+const sToSlider=s=>Math.round(Math.log(s/MINS)/Math.log(MAXS/MINS)*1000);
+const sliderToS=n=>MINS*Math.pow(MAXS/MINS,n/1000);
+function msg(t){const m=$('msg');m.textContent=t;m.style.display='block';clearTimeout(msg.t);msg.t=setTimeout(()=>m.style.display='none',4000)}
+function render(){
+  ov.style.transform=`translate(-50%,-50%) translate(${S.x}px,${S.y}px) rotate(${S.r}deg) scale(${S.s*S.flip},${S.s})`;
+  ov.style.opacity=S.op;
+  cw.style.transform=`scale(${S.cam})`;
+  $('sImg').value=sToSlider(S.s);$('oImg').textContent=(S.s*100).toFixed(S.s<.1?1:0)+'%';
+  $('sCam').value=S.cam*100;$('oCam').textContent=Math.round(S.cam*100)+'%';
+  $('sOp').value=S.op*100;$('oOp').textContent=Math.round(S.op*100)+'%';
+  const r=((S.r+540)%360)-180;$('sRot').value=r;$('oRot').textContent=Math.round(r)+'°';
+}
+let track=null;
+async function startCam(){
+  try{
+    const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920}},audio:false});
+    v.srcObject=st;track=st.getVideoTracks()[0];
+    $('cam').textContent='Cámara activa';
+    const cap=track.getCapabilities?track.getCapabilities():{};
+    if(cap.zoom){const z=$('sZoom');z.min=cap.zoom.min;z.max=cap.zoom.max;z.step=cap.zoom.step||0.1;z.value=cap.zoom.min;$('zrow').style.display='flex'}
+  }catch(e){msg(location.protocol==='https:'?'No se pudo abrir la cámara. Revisa el permiso de Chrome para este sitio.':'Chrome no permite cámara en vivo desde un archivo. Usa 📸 Foto de fondo o sube la página a https.')}
+}
+$('cam').onclick=startCam;
+$('bgfile').onchange=e=>{
+  const f=e.target.files[0];if(!f)return;
+  v.style.display='none';
+  cw.style.background='#111 center/contain no-repeat url('+URL.createObjectURL(f)+')';
+  msg('Foto puesta de fondo. Puedes achicarla con Tamaño cámara.');
+};
+$('sZoom').oninput=e=>{const z=+e.target.value;$('oZoom').textContent=z.toFixed(1)+'x';track&&track.applyConstraints({advanced:[{zoom:z}]}).catch(()=>{})};
+$('file').onchange=e=>{
+  const f=e.target.files[0];if(!f)return;
+  ov.onload=()=>{
+    ov.style.display='block';
+    const k=Math.min(innerWidth*.8/ov.naturalWidth,innerHeight*.5/ov.naturalHeight);
+    S.s=k;S.x=0;S.y=0;S.r=0;render();
+  };
+  ov.src=URL.createObjectURL(f);
+};
+$('sImg').oninput=e=>{S.s=sliderToS(+e.target.value);render()};
+$('sCam').oninput=e=>{S.cam=e.target.value/100;render()};
+$('sOp').oninput=e=>{S.op=e.target.value/100;render()};
+$('sRot').oninput=e=>{S.r=+e.target.value;render()};
+$('lock').onclick=()=>{S.locked=!S.locked;$('lock').textContent=S.locked?'🔒 Bloqueado':'🔓 Bloquear';$('lock').classList.toggle('on',S.locked)};
+$('flip').onclick=()=>{S.flip*=-1;render()};
+$('reset').onclick=()=>{Object.assign(S,{x:0,y:0,s:1,r:0,op:.5,cam:1,flip:1});render()};
+$('toggle').onclick=()=>$('panel').classList.toggle('min');
+// gestos
+const P=new Map();let g=null;
+const stage=$('stage');
+stage.addEventListener('pointerdown',e=>{
+  if(e.target.closest('#panel,#toggle'))return;
+  stage.setPointerCapture(e.pointerId);P.set(e.pointerId,{x:e.clientX,y:e.clientY});g=snap();
+});
+stage.addEventListener('pointermove',e=>{
+  if(!P.has(e.pointerId)||S.locked)return;
+  P.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  const pts=[...P.values()];
+  if(!g)g=snap();
+  if(pts.length===1){S.x=g.x+(pts[0].x-g.px);S.y=g.y+(pts[0].y-g.py)}
+  else if(pts.length>=2){
+    const [a,b]=pts,d=Math.hypot(b.x-a.x,b.y-a.y),an=Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;
+    S.s=Math.min(MAXS,Math.max(MINS,g.s*d/g.d));S.r=g.r+(an-g.an);
+    S.x=g.x+((a.x+b.x)/2-g.px);S.y=g.y+((a.y+b.y)/2-g.py);
+  }
+  render();
+});
+function snap(){
+  const pts=[...P.values()];if(!pts.length)return null;
+  const a=pts[0],b=pts[1]||a;
+  return{x:S.x,y:S.y,s:S.s,r:S.r,px:(a.x+b.x)/2,py:(a.y+b.y)/2,d:Math.hypot(b.x-a.x,b.y-a.y)||1,an:Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI};
+}
+const end=e=>{P.delete(e.pointerId);g=snap()};
+stage.addEventListener('pointerup',end);stage.addEventListener('pointercancel',end);
+render();
+</script>
+</body>
+</html>
